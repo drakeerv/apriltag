@@ -36,6 +36,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdint.h>
 
 #include "apriltag.h"
+#include "apriltag_simd.h"
 #include "common/image_u8x3.h"
 #include "common/zarray.h"
 #include "common/unionfind.h"
@@ -1107,18 +1108,33 @@ void do_minmax_task(void *p)
     image_u8_t *im = task->im;
 
     for (int tx = 0; tx < tw; tx++) {
-        uint8_t max = 0, min = 255;
-
+        const int tile_y = ty * tilesz;
+        const int tile_x = tx * tilesz;
+        
+        // For 4x4 tiles with non-contiguous memory, use optimized scalar code
+        // Initialize with first pixel
+        const uint8_t *row0 = &im->buf[tile_y * s + tile_x];
+        uint8_t min = row0[0];
+        uint8_t max = row0[0];
+        
+        // Process each row
         for (int dy = 0; dy < tilesz; dy++) {
-
-            for (int dx = 0; dx < tilesz; dx++) {
-
-                uint8_t v = im->buf[(ty*tilesz+dy)*s + tx*tilesz + dx];
-                if (v < min)
-                    min = v;
-                if (v > max)
-                    max = v;
-            }
+            const uint8_t *row = &im->buf[(tile_y + dy) * s + tile_x];
+            
+            // Unroll the inner loop for better performance
+            uint8_t v0 = row[0];
+            uint8_t v1 = row[1];
+            uint8_t v2 = row[2];
+            uint8_t v3 = row[3];
+            
+            if (v0 < min) min = v0;
+            if (v0 > max) max = v0;
+            if (v1 < min) min = v1;
+            if (v1 > max) max = v1;
+            if (v2 < min) min = v2;
+            if (v2 > max) max = v2;
+            if (v3 < min) min = v3;
+            if (v3 > max) max = v3;
         }
 
         task->im_max[ty*tw+tx] = max;
@@ -1197,17 +1213,16 @@ void do_threshold_task(void *p)
         // can be substantially brighter than white tag parts
         uint8_t thresh = min + (max - min) / 2;
 
+        // Process each row of the tile
         for (int dy = 0; dy < tilesz; dy++) {
             int y = ty*tilesz + dy;
-
+            int x_start = tx*tilesz;
+            
+            // Scalar path (used for small 4-pixel rows)
             for (int dx = 0; dx < tilesz; dx++) {
-                int x = tx*tilesz + dx;
-
+                int x = x_start + dx;
                 uint8_t v = im->buf[y*s+x];
-                if (v > thresh)
-                    threshim->buf[y*s+x] = 255;
-                else
-                    threshim->buf[y*s+x] = 0;
+                threshim->buf[y*s+x] = (v > thresh) ? 255 : 0;
             }
         }
     }

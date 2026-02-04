@@ -98,6 +98,25 @@ set_target_properties(${PROJECT_NAME} PROPERTIES SOVERSION 3 VERSION ${PROJECT_V
 set_target_properties(${PROJECT_NAME} PROPERTIES DEBUG_POSTFIX "d")
 set_property(TARGET ${PROJECT_NAME} PROPERTY C_STANDARD 99)
 
+# Add SIMD optimization flags
+if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+    if(CMAKE_BUILD_TYPE MATCHES "Release")
+        # Enable SIMD and vectorization
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)")
+            # ARM NEON support
+            target_compile_options(${PROJECT_NAME} PRIVATE -march=armv8-a+simd)
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7)")
+            # ARMv7 NEON support
+            target_compile_options(${PROJECT_NAME} PRIVATE -mfpu=neon -march=armv7-a)
+        else()
+            # x86/x64 - use native arch which will enable SSE/AVX as available
+            target_compile_options(${PROJECT_NAME} PRIVATE -march=native -mtune=native)
+        endif()
+        # Additional vectorization hints
+        target_compile_options(${PROJECT_NAME} PRIVATE -ftree-vectorize -ffast-math)
+    endif()
+endif()
+
 
 include(GNUInstallDirs)
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -228,6 +247,10 @@ if (BUILD_EXAMPLES)
     else()
         message(STATUS "OpenCV not found: Not building demo")
     endif(OpenCV_FOUND)
+
+    # benchmark_profile
+    add_executable(benchmark_profile benchmark_profile.c)
+    target_link_libraries(benchmark_profile ${PROJECT_NAME})
 
     # install example programs
     install(TARGETS apriltag_demo RUNTIME DESTINATION bin)
