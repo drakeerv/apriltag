@@ -1107,35 +1107,67 @@ void do_minmax_task(void *p)
     int tw = task->im->width / tilesz;
     image_u8_t *im = task->im;
 
-    for (int tx = 0; tx < tw; tx++) {
-        const int tile_y = ty * tilesz;
+    const int tile_y = ty * tilesz;
+    
+    int tx = 0;
+    
+#if defined(APRILTAG_USE_NEON) || defined(APRILTAG_USE_SSE2)
+    // SIMD path: process 4 contiguous tiles (16 pixels) at a time per row
+    for (; tx + 4 <= tw; tx += 4) {
         const int tile_x = tx * tilesz;
         
-        // For 4x4 tiles with non-contiguous memory, scalar code with
-        // loop unrolling provides better performance than SIMD gathering
-        // Initialize with first pixel
-        const uint8_t *row0 = &im->buf[tile_y * s + tile_x];
-        uint8_t min = row0[0];
-        uint8_t max = row0[0];
+        // Initialize min/max for 16 pixels
+        simd_u8x16_t v_min = simd_set1_u8(255);
+        simd_u8x16_t v_max = simd_set1_u8(0);
         
-        // Process each row
+        // Process all 4 rows, loading 16 contiguous pixels each time
         for (int dy = 0; dy < tilesz; dy++) {
             const uint8_t *row = &im->buf[(tile_y + dy) * s + tile_x];
             
-            // Unroll the inner loop for better performance
-            uint8_t v0 = row[0];
-            uint8_t v1 = row[1];
-            uint8_t v2 = row[2];
-            uint8_t v3 = row[3];
+            // Load 16 contiguous pixels (4 tiles)
+            simd_u8x16_t v_pixels = simd_load_u8x16(row);
+            v_min = simd_min_u8(v_min, v_pixels);
+            v_max = simd_max_u8(v_max, v_pixels);
+        }
+        
+        // Extract results for each of the 4 tiles
+        uint8_t min_vals[16], max_vals[16];
+        simd_store_u8x16(min_vals, v_min);
+        simd_store_u8x16(max_vals, v_max);
+        
+        // Compute min/max for each of the 4 tiles
+        for (int t = 0; t < 4; t++) {
+            uint8_t tile_min = 255;
+            uint8_t tile_max = 0;
             
-            if (v0 < min) min = v0;
-            if (v0 > max) max = v0;
-            if (v1 < min) min = v1;
-            if (v1 > max) max = v1;
-            if (v2 < min) min = v2;
-            if (v2 > max) max = v2;
-            if (v3 < min) min = v3;
-            if (v3 > max) max = v3;
+            // Each tile is 4 pixels
+            for (int i = 0; i < tilesz; i++) {
+                int idx = t * tilesz + i;
+                if (min_vals[idx] < tile_min) tile_min = min_vals[idx];
+                if (max_vals[idx] > tile_max) tile_max = max_vals[idx];
+            }
+            
+            task->im_min[ty * tw + tx + t] = tile_min;
+            task->im_max[ty * tw + tx + t] = tile_max;
+        }
+    }
+#endif
+    
+    // Scalar fallback for remaining tiles
+    for (; tx < tw; tx++) {
+        const int tile_x = tx * tilesz;
+        
+        uint8_t min = 255;
+        uint8_t max = 0;
+        
+        for (int dy = 0; dy < tilesz; dy++) {
+            const uint8_t *row = &im->buf[(tile_y + dy) * s + tile_x];
+            
+            for (int dx = 0; dx < tilesz; dx++) {
+                uint8_t v = row[dx];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
         }
 
         task->im_max[ty*tw+tx] = max;
@@ -1214,17 +1246,19 @@ void do_threshold_task(void *p)
         // can be substantially brighter than white tag parts
         uint8_t thresh = min + (max - min) / 2;
 
-        // Process each row of the tile
+        // Scalar path with optimized branching
         for (int dy = 0; dy < tilesz; dy++) {
             int y = ty*tilesz + dy;
             int x_start = tx*tilesz;
             
-            // Scalar path (used for small 4-pixel rows)
-            for (int dx = 0; dx < tilesz; dx++) {
-                int x = x_start + dx;
-                uint8_t v = im->buf[y*s+x];
-                threshim->buf[y*s+x] = (v > thresh) ? 255 : 0;
-            }
+            const uint8_t *in_ptr = &im->buf[y*s+x_start];
+            uint8_t *out_ptr = &threshim->buf[y*s+x_start];
+            
+            // Unroll loop manually for better performance
+            out_ptr[0] = (in_ptr[0] > thresh) ? 255 : 0;
+            out_ptr[1] = (in_ptr[1] > thresh) ? 255 : 0;
+            out_ptr[2] = (in_ptr[2] > thresh) ? 255 : 0;
+            out_ptr[3] = (in_ptr[3] > thresh) ? 255 : 0;
         }
     }
 }
