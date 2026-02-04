@@ -74,15 +74,15 @@ void ccl_destroy(ccl_component_t *ccl);
 uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim);
 
 // Get the root label for a given label (after processing)
+// Note: After ccl_process completes Pass 2, labels are already flattened,
+// so this is just a single array lookup
 static inline uint32_t ccl_get_representative(ccl_component_t *ccl, uint32_t label) {
     // Safety check for invalid labels
     if (label >= ccl->max_labels) {
         return 0; // Return background for invalid label
     }
-    while (label < ccl->max_labels && ccl->equiv[label] != label) {
-        label = ccl->equiv[label];
-    }
-    return label;
+    // After Pass 2, equiv table is flattened, so this is just one lookup
+    return ccl->equiv[label];
 }
 
 // Get the size of a component
