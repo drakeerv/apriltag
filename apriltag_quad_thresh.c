@@ -624,6 +624,12 @@ struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
     struct line_fit_pt *lfps = calloc(sz, sizeof(struct line_fit_pt));
     double sum_Mx = 0, sum_My = 0, sum_Mxx = 0, sum_Myy = 0, sum_Mxy = 0, sum_W = 0;
 
+    // Cache image stride and buffer pointer
+    const int stride = im->stride;
+    const uint8_t* __restrict buf = im->buf;  // restrict keyword for better optimization
+    const int width = im->width;
+    const int height = im->height;
+
     for (int i = 0; i < sz; i++) {
         struct pt *p;
         zarray_get_volatile(cluster, i, &p);
@@ -635,14 +641,15 @@ struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
         int ix = x, iy = y;
         double W = 1;
 
-        if (ix > 0 && ix+1 < im->width && iy > 0 && iy+1 < im->height) {
-            int grad_x = im->buf[iy * im->stride + ix + 1] -
-                im->buf[iy * im->stride + ix - 1];
-
-            int grad_y = im->buf[(iy+1) * im->stride + ix] -
-                im->buf[(iy-1) * im->stride + ix];
+        // Cache condition check - unlikely to be at border
+        if (__builtin_expect((ix > 0 && ix+1 < width && iy > 0 && iy+1 < height), 1)) {
+            int offset = iy * stride + ix;
+            // Compute gradients with cached offset
+            int grad_x = buf[offset + 1] - buf[offset - 1];
+            int grad_y = buf[offset + stride] - buf[offset - stride];
 
             // XXX Tunable. How to shape the gradient magnitude?
+            // sqrt is expensive, but necessary for this calculation
             W = sqrt(grad_x*grad_x + grad_y*grad_y) + 1;
         }
 
@@ -797,21 +804,53 @@ int fit_quad(
     uint16_t xmin = p1->x;
     uint16_t ymax = p1->y;
     uint16_t ymin = p1->y;
-    for (int pidx = 1; pidx < zarray_size(cluster); pidx++) {
+    
+    // Unroll loop for better performance - process 4 points at a time when possible
+    int pidx = 1;
+    for (; pidx + 3 < sz; pidx += 4) {
+        struct pt *p0, *p1, *p2, *p3;
+        zarray_get_volatile(cluster, pidx, &p0);
+        zarray_get_volatile(cluster, pidx + 1, &p1);
+        zarray_get_volatile(cluster, pidx + 2, &p2);
+        zarray_get_volatile(cluster, pidx + 3, &p3);
+        
+        // Process 4 points - compiler may vectorize this
+        uint16_t x0 = p0->x, x1 = p1->x, x2 = p2->x, x3 = p3->x;
+        uint16_t y0 = p0->y, y1 = p1->y, y2 = p2->y, y3 = p3->y;
+        
+        // Find local min/max for these 4 points
+        uint16_t local_xmin = x0 < x1 ? x0 : x1;
+        local_xmin = x2 < local_xmin ? x2 : local_xmin;
+        local_xmin = x3 < local_xmin ? x3 : local_xmin;
+        
+        uint16_t local_xmax = x0 > x1 ? x0 : x1;
+        local_xmax = x2 > local_xmax ? x2 : local_xmax;
+        local_xmax = x3 > local_xmax ? x3 : local_xmax;
+        
+        uint16_t local_ymin = y0 < y1 ? y0 : y1;
+        local_ymin = y2 < local_ymin ? y2 : local_ymin;
+        local_ymin = y3 < local_ymin ? y3 : local_ymin;
+        
+        uint16_t local_ymax = y0 > y1 ? y0 : y1;
+        local_ymax = y2 > local_ymax ? y2 : local_ymax;
+        local_ymax = y3 > local_ymax ? y3 : local_ymax;
+        
+        // Update global min/max
+        xmin = local_xmin < xmin ? local_xmin : xmin;
+        xmax = local_xmax > xmax ? local_xmax : xmax;
+        ymin = local_ymin < ymin ? local_ymin : ymin;
+        ymax = local_ymax > ymax ? local_ymax : ymax;
+    }
+    
+    // Handle remaining points
+    for (; pidx < sz; pidx++) {
         struct pt *p;
         zarray_get_volatile(cluster, pidx, &p);
 
-        if (p->x > xmax) {
-            xmax = p->x;
-        } else if (p->x < xmin) {
-            xmin = p->x;
-        }
-
-        if (p->y > ymax) {
-            ymax = p->y;
-        } else if (p->y < ymin) {
-            ymin = p->y;
-        }
+        xmin = p->x < xmin ? p->x : xmin;
+        xmax = p->x > xmax ? p->x : xmax;
+        ymin = p->y < ymin ? p->y : ymin;
+        ymax = p->y > ymax ? p->y : ymax;
     }
 
     if ((xmax - xmin)*(ymax - ymin) < tag_width) {
@@ -830,7 +869,9 @@ int fit_quad(
 
     float quadrants[2][2] = {{-1*(2 << 15), 0}, {2*(2 << 15), 2 << 15}};
 
-    for (int pidx = 0; pidx < zarray_size(cluster); pidx++) {
+    // Cache sz to avoid repeated function call
+    int cluster_sz = sz;
+    for (int pidx = 0; pidx < cluster_sz; pidx++) {
         struct pt *p;
         zarray_get_volatile(cluster, pidx, &p);
 
@@ -840,16 +881,17 @@ int fit_quad(
         dot += dx*p->gx + dy*p->gy;
 
         float quadrant = quadrants[dy > 0][dx > 0];
-        if (dy < 0) {
-            dy = -dy;
-            dx = -dx;
-        }
+        
+        // Branchless absolute value and quadrant adjustment
+        int dy_negative = (dy < 0);
+        dy = dy_negative ? -dy : dy;
+        dx = dy_negative ? -dx : dx;
 
-        if (dx < 0) {
-            float tmp = dx;
-            dx = dy;
-            dy = -tmp;
-        }
+        int dx_negative = (dx < 0);
+        float tmp = dx;
+        dx = dx_negative ? dy : dx;
+        dy = dx_negative ? -tmp : dy;
+        
         p->slope = quadrant + dy/dx;
     }
 
