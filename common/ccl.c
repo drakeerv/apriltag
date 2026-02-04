@@ -144,9 +144,15 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
         int buf_offset = y * stride;
         int prev_buf_offset = (y - 1) * stride;
         
+        // Cache row pointers for better locality
+        uint8_t* cur_row = &buf[buf_offset];
+        uint8_t* prev_row = &buf[prev_buf_offset];
+        uint32_t* label_row = &labels[row_offset];
+        uint32_t* prev_label_row = &labels[prev_row_offset];
+        
         for (int x = 1; x < width - 1; x++) {
-            uint8_t val = buf[buf_offset + x];
-            if (val == 127) continue; // Skip mid-gray pixels
+            uint8_t val = cur_row[x];
+            if (__builtin_expect(val == 127, 0)) continue; // Unlikely: skip mid-gray pixels
             
             uint32_t min_label = 0;
             
@@ -154,50 +160,54 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
             // For AprilTag, we use 8-connectivity for white pixels
             
             // Left neighbor
-            if (x > 0 && buf[buf_offset + x - 1] == val && labels[row_offset + x - 1] != 0) {
-                min_label = labels[row_offset + x - 1];
+            uint32_t left_label = label_row[x - 1];
+            if (cur_row[x - 1] == val && left_label != 0) {
+                min_label = left_label;
             }
             
             // Top neighbor
-            if (buf[prev_buf_offset + x] == val && labels[prev_row_offset + x] != 0) {
+            uint32_t top_label = prev_label_row[x];
+            if (prev_row[x] == val && top_label != 0) {
                 if (min_label == 0) {
-                    min_label = labels[prev_row_offset + x];
-                } else if (labels[prev_row_offset + x] != min_label) {
-                    merge_labels(equiv, min_label, labels[prev_row_offset + x]);
+                    min_label = top_label;
+                } else if (top_label != min_label) {
+                    merge_labels(equiv, min_label, top_label);
                 }
             }
             
             // For white pixels (255), check diagonal neighbors for 8-connectivity
-            if (val == 255) {
+            if (__builtin_expect(val == 255, 1)) {  // Likely: most foreground pixels are white
                 // Top-left neighbor
-                if (x > 0 && buf[prev_buf_offset + x - 1] == val && labels[prev_row_offset + x - 1] != 0) {
+                uint32_t top_left_label = prev_label_row[x - 1];
+                if (prev_row[x - 1] == val && top_left_label != 0) {
                     if (min_label == 0) {
-                        min_label = labels[prev_row_offset + x - 1];
-                    } else if (labels[prev_row_offset + x - 1] != min_label) {
-                        merge_labels(equiv, min_label, labels[prev_row_offset + x - 1]);
+                        min_label = top_left_label;
+                    } else if (top_left_label != min_label) {
+                        merge_labels(equiv, min_label, top_left_label);
                     }
                 }
                 
                 // Top-right neighbor
-                if (x < width - 1 && buf[prev_buf_offset + x + 1] == val && labels[prev_row_offset + x + 1] != 0) {
+                uint32_t top_right_label = prev_label_row[x + 1];
+                if (prev_row[x + 1] == val && top_right_label != 0) {
                     if (min_label == 0) {
-                        min_label = labels[prev_row_offset + x + 1];
-                    } else if (labels[prev_row_offset + x + 1] != min_label) {
-                        merge_labels(equiv, min_label, labels[prev_row_offset + x + 1]);
+                        min_label = top_right_label;
+                    } else if (top_right_label != min_label) {
+                        merge_labels(equiv, min_label, top_right_label);
                     }
                 }
             }
             
             // Assign label
-            if (min_label == 0) {
+            if (__builtin_expect(min_label == 0, 0)) {  // Unlikely: most pixels connect to existing labels
                 // New component
-                if (next_label >= ccl->max_labels) {
-                    labels[row_offset + x] = next_label - 1;
+                if (__builtin_expect(next_label >= ccl->max_labels, 0)) {
+                    label_row[x] = next_label - 1;
                 } else {
-                    labels[row_offset + x] = next_label++;
+                    label_row[x] = next_label++;
                 }
             } else {
-                labels[row_offset + x] = min_label;
+                label_row[x] = min_label;
             }
         }
     }
@@ -225,26 +235,33 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
     
     // Count component sizes and collect statistics
     // This is where we merge the clustering step into Pass 2
+    // Optimize with pointer arithmetic and fewer array lookups
     for (int y = 0; y < height; y++) {
         int row_offset = y * width;
+        uint32_t* label_row = &labels[row_offset];
+        
         for (int x = 0; x < width; x++) {
-            uint32_t label = labels[row_offset + x];
-            if (label != 0) {
+            uint32_t label = label_row[x];
+            if (__builtin_expect(label != 0, 1)) {  // Branch hint: most pixels are labeled
                 uint32_t root_label = equiv[label];
-                labels[row_offset + x] = root_label; // Update to root label
+                label_row[x] = root_label; // Update to root label
+                
+                // Cache pointer to stats structure to reduce array indexing
+                ccl_component_stats_t* stats = &ccl->stats[root_label];
                 
                 // Update statistics (this replaces separate clustering pass)
                 ccl->comp_size[root_label]++;
-                ccl->stats[root_label].count++;
+                stats->count++;
                 // Don't cast to uint32_t - let it promote to uint64_t for accumulation
-                ccl->stats[root_label].sum_x += x;
-                ccl->stats[root_label].sum_y += y;
+                stats->sum_x += x;
+                stats->sum_y += y;
                 
-                // Update bounding box - implicit cast to uint32_t is fine for comparison
-                if (x < (int)ccl->stats[root_label].min_x) ccl->stats[root_label].min_x = x;
-                if (x > (int)ccl->stats[root_label].max_x) ccl->stats[root_label].max_x = x;
-                if (y < (int)ccl->stats[root_label].min_y) ccl->stats[root_label].min_y = y;
-                if (y > (int)ccl->stats[root_label].max_y) ccl->stats[root_label].max_y = y;
+                // Update bounding box with branchless min/max
+                // Cast both sides to maintain type consistency
+                stats->min_x = (x < (int)stats->min_x) ? (uint32_t)x : stats->min_x;
+                stats->max_x = (x > (int)stats->max_x) ? (uint32_t)x : stats->max_x;
+                stats->min_y = (y < (int)stats->min_y) ? (uint32_t)y : stats->min_y;
+                stats->max_y = (y > (int)stats->max_y) ? (uint32_t)y : stats->max_y;
             }
         }
     }

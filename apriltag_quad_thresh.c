@@ -1766,9 +1766,11 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
 
     for (int y = y0; y < y1; y++) {
         bool connected_last = false;
+        uint8_t* row_ptr = &threshim->buf[y*ts];  // Cache row pointer
+        
         for (int x = 1; x < w-1; x++) {
 
-            uint8_t v0 = threshim->buf[y*ts + x];
+            uint8_t v0 = row_ptr[x];  // Use cached pointer
             if (v0 == 127) {
                 connected_last = false;
                 continue;
@@ -1781,7 +1783,8 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
                 continue;
             }
             uint64_t rep0 = ccl_get_representative(ccl, label0);
-            if (ccl_get_component_size(ccl, rep0) < 25) {
+            uint32_t size0 = ccl_get_component_size(ccl, rep0);  // Cache size
+            if (size0 < 25) {
                 connected_last = false;
                 continue;
             }
@@ -1789,28 +1792,30 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             bool connected;
 #define DO_CONN_CCL(dx, dy)                                             \
             if (1) {                                                    \
-                uint8_t v1 = threshim->buf[(y + dy)*ts + x + dx];       \
+                uint8_t v1 = row_ptr[x + dx + (dy)*ts];  /* Use relative offset */ \
                                                                         \
                 if (v0 + v1 == 255) {                                   \
                     uint32_t label1 = ccl_get_label(ccl, x + dx, y + dy); \
                     if (label1 != 0) {                                   \
                         uint64_t rep1 = ccl_get_representative(ccl, label1); \
-                        if (ccl_get_component_size(ccl, rep1) > 24) {        \
+                        uint32_t size1 = ccl_get_component_size(ccl, rep1); \
+                        if (size1 > 24) {        \
                             uint64_t clusterid;                                 \
                             if (rep0 < rep1)                                    \
                                 clusterid = (rep1 << 32) + rep0;                \
                             else                                                \
                                 clusterid = (rep0 << 32) + rep1;                \
                                                                                 \
-                            /* XXX lousy hash function */                       \
+                            /* Hash function - cache bucket calculation */      \
                             uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
                             struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
+                            /* Linear probing - could be optimized to quadratic */ \
                             while (entry && entry->id != clusterid) {           \
                                 entry = entry->next;                            \
                             }                                                   \
                                                                                 \
                             if (!entry) {                                       \
-                                if (mem_pool_loc == mem_chunk_size) {           \
+                                if (__builtin_expect(mem_pool_loc == mem_chunk_size, 0)) { \
                                     mem_pool_loc = 0;                           \
                                     mem_pool_idx++;                             \
                                     mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
