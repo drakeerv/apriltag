@@ -1972,16 +1972,10 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
 
     workerpool_run(td->wp);
 
-    fprintf(stderr, "gradient_clusters_ccl: All tasks complete, ntasks=%d\n", ntasks);
-    fflush(stderr);
-
     zarray_t** clusters_list = malloc(sizeof(zarray_t *)*ntasks);
     for (int i = 0; i < ntasks; i++) {
         clusters_list[i] = tasks[i].clusters;
     }
-
-    fprintf(stderr, "gradient_clusters_ccl: Starting merge, length=%d\n", ntasks);
-    fflush(stderr);
 
     int length = ntasks;
     while (length > 1) {
@@ -1998,9 +1992,6 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
         length = (length >> 1) + length % 2;
     }
 
-    fprintf(stderr, "gradient_clusters_ccl: Merge complete, creating final clusters array\n");
-    fflush(stderr);
-
     clusters = zarray_create(sizeof(zarray_t*));
     zarray_ensure_capacity(clusters, zarray_size(clusters_list[0]));
     for (int i = 0; i < zarray_size(clusters_list[0]); i++) {
@@ -2010,16 +2001,10 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
         free(*hash);
     }
 
-    fprintf(stderr, "gradient_clusters_ccl: Cleaning up\n");
-    fflush(stderr);
-
     zarray_destroy(clusters_list[0]);
     free(clusters_list);
 
     free(tasks);
-
-    fprintf(stderr, "gradient_clusters_ccl: Complete, returning\n");
-    fflush(stderr);
 
     return clusters;
 }
@@ -2198,12 +2183,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     zarray_t* clusters = gradient_clusters_ccl(td, threshim, w, h, ts, ccl);
 
-    fprintf(stderr, "Back from gradient_clusters_ccl, clusters has %d items\n", zarray_size(clusters));
-    fflush(stderr);
-
     if (td->debug) {
-        fprintf(stderr, "Debug mode: creating visualization\n");
-        fflush(stderr);
         image_u8x3_t *d = image_u8x3_create(w, h);
 
         for (int i = 0; i < zarray_size(clusters); i++) {
@@ -2239,22 +2219,13 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     image_u8_destroy(threshim);
     timeprofile_stamp(td->tp, "make clusters");
 
-    fprintf(stderr, "About to call fit_quads\n");
-    fflush(stderr);
-
     ////////////////////////////////////////////////////////
     // step 3. process each connected component.
 
     zarray_t* quads = fit_quads(td, w, h, clusters, im);
 
-    fprintf(stderr, "fit_quads returned\n");
-    fflush(stderr);
-
     // Clean up CCL structure
     ccl_destroy(ccl);
-
-    fprintf(stderr, "ccl_destroy complete\n");
-    fflush(stderr);
 
     if (td->debug) {
         FILE *f = fopen("debug_lines.ps", "w");
