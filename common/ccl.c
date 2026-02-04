@@ -236,14 +236,15 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
                 // Update statistics (this replaces separate clustering pass)
                 ccl->comp_size[root_label]++;
                 ccl->stats[root_label].count++;
-                ccl->stats[root_label].sum_x += (uint32_t)x;
-                ccl->stats[root_label].sum_y += (uint32_t)y;
+                // Don't cast to uint32_t - let it promote to uint64_t for accumulation
+                ccl->stats[root_label].sum_x += x;
+                ccl->stats[root_label].sum_y += y;
                 
-                // Update bounding box
-                if ((uint32_t)x < ccl->stats[root_label].min_x) ccl->stats[root_label].min_x = (uint32_t)x;
-                if ((uint32_t)x > ccl->stats[root_label].max_x) ccl->stats[root_label].max_x = (uint32_t)x;
-                if ((uint32_t)y < ccl->stats[root_label].min_y) ccl->stats[root_label].min_y = (uint32_t)y;
-                if ((uint32_t)y > ccl->stats[root_label].max_y) ccl->stats[root_label].max_y = (uint32_t)y;
+                // Update bounding box - implicit cast to uint32_t is fine for comparison
+                if (x < (int)ccl->stats[root_label].min_x) ccl->stats[root_label].min_x = x;
+                if (x > (int)ccl->stats[root_label].max_x) ccl->stats[root_label].max_x = x;
+                if (y < (int)ccl->stats[root_label].min_y) ccl->stats[root_label].min_y = y;
+                if (y > (int)ccl->stats[root_label].max_y) ccl->stats[root_label].max_y = y;
             }
         }
     }
