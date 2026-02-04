@@ -41,10 +41,22 @@ extern "C" {
 
 typedef struct ccl_component ccl_component_t;
 
+// Structure to store component statistics gathered during Pass 2
+typedef struct ccl_component_stats {
+    uint32_t count;        // Number of pixels in component
+    uint64_t sum_x;        // Sum of x coordinates (for center calculation)
+    uint64_t sum_y;        // Sum of y coordinates
+    uint32_t min_x;        // Bounding box
+    uint32_t max_x;
+    uint32_t min_y;
+    uint32_t max_y;
+} ccl_component_stats_t;
+
 struct ccl_component {
     uint32_t *labels;      // Label for each pixel (w*h array)
     uint32_t *equiv;       // Label equivalence table
     uint32_t *comp_size;   // Size of each component
+    ccl_component_stats_t *stats; // Component statistics (gathered during Pass 2)
     uint32_t max_labels;   // Maximum number of labels allocated
     uint32_t num_labels;   // Actual number of labels used
     int width;
@@ -87,6 +99,13 @@ static inline uint32_t ccl_get_label(ccl_component_t *ccl, int x, int y) {
         return 0; // Return background label for out-of-bounds access
     }
     return ccl->labels[y * ccl->width + x];
+}
+
+// Get component statistics (for optimized clustering)
+static inline ccl_component_stats_t* ccl_get_stats(ccl_component_t *ccl, uint32_t label) {
+    if (label == 0 || label >= ccl->max_labels) return NULL;
+    uint32_t root = ccl_get_representative(ccl, label);
+    return &ccl->stats[root];
 }
 
 #ifdef __cplusplus

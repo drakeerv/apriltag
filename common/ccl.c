@@ -26,8 +26,10 @@ either expressed or implied, of the Regents of The University of Michigan.
 */
 
 #include "ccl.h"
+#include "apriltag_simd.h"
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 
 ccl_component_t *ccl_create(int width, int height) {
     ccl_component_t *ccl = (ccl_component_t *)calloc(1, sizeof(ccl_component_t));
@@ -41,10 +43,19 @@ ccl_component_t *ccl_create(int width, int height) {
     ccl->max_labels = (width * height) / 2 + 1;
     ccl->equiv = (uint32_t *)malloc(ccl->max_labels * sizeof(uint32_t));
     ccl->comp_size = (uint32_t *)calloc(ccl->max_labels, sizeof(uint32_t));
+    ccl->stats = (ccl_component_stats_t *)calloc(ccl->max_labels, sizeof(ccl_component_stats_t));
     
     // Initialize equivalence table (each label points to itself initially)
     for (uint32_t i = 0; i < ccl->max_labels; i++) {
         ccl->equiv[i] = i;
+    }
+    
+    // Initialize stats bounding boxes to invalid values
+    for (uint32_t i = 0; i < ccl->max_labels; i++) {
+        ccl->stats[i].min_x = UINT32_MAX;
+        ccl->stats[i].min_y = UINT32_MAX;
+        ccl->stats[i].max_x = 0;
+        ccl->stats[i].max_y = 0;
     }
     
     ccl->num_labels = 1; // Start at 1 (0 is background)
@@ -57,6 +68,7 @@ void ccl_destroy(ccl_component_t *ccl) {
         free(ccl->labels);
         free(ccl->equiv);
         free(ccl->comp_size);
+        free(ccl->stats);
         free(ccl);
     }
 }
@@ -192,22 +204,46 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
     
     ccl->num_labels = next_label;
     
-    // Pass 2: Resolve equivalences and compute component sizes
+    // Pass 2: Resolve equivalences, compute component sizes, and collect statistics
     memset(ccl->comp_size, 0, ccl->max_labels * sizeof(uint32_t));
+    
+    // Re-initialize stats for clean slate
+    for (uint32_t i = 0; i < ccl->max_labels; i++) {
+        ccl->stats[i].count = 0;
+        ccl->stats[i].sum_x = 0;
+        ccl->stats[i].sum_y = 0;
+        ccl->stats[i].min_x = UINT32_MAX;
+        ccl->stats[i].min_y = UINT32_MAX;
+        ccl->stats[i].max_x = 0;
+        ccl->stats[i].max_y = 0;
+    }
     
     // Flatten equivalence table
     for (uint32_t i = 1; i < next_label; i++) {
         equiv[i] = find_root(equiv, i);
     }
     
-    // Count component sizes
+    // Count component sizes and collect statistics
+    // This is where we merge the clustering step into Pass 2
     for (int y = 0; y < height; y++) {
         int row_offset = y * width;
         for (int x = 0; x < width; x++) {
             uint32_t label = labels[row_offset + x];
             if (label != 0) {
-                labels[row_offset + x] = equiv[label]; // Update to root label
-                ccl->comp_size[equiv[label]]++;
+                uint32_t root_label = equiv[label];
+                labels[row_offset + x] = root_label; // Update to root label
+                
+                // Update statistics (this replaces separate clustering pass)
+                ccl->comp_size[root_label]++;
+                ccl->stats[root_label].count++;
+                ccl->stats[root_label].sum_x += (uint32_t)x;
+                ccl->stats[root_label].sum_y += (uint32_t)y;
+                
+                // Update bounding box
+                if ((uint32_t)x < ccl->stats[root_label].min_x) ccl->stats[root_label].min_x = (uint32_t)x;
+                if ((uint32_t)x > ccl->stats[root_label].max_x) ccl->stats[root_label].max_x = (uint32_t)x;
+                if ((uint32_t)y < ccl->stats[root_label].min_y) ccl->stats[root_label].min_y = (uint32_t)y;
+                if ((uint32_t)y > ccl->stats[root_label].max_y) ccl->stats[root_label].max_y = (uint32_t)y;
             }
         }
     }
