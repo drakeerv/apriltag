@@ -1,1 +1,0 @@
-/home/runner/work/apriltag/.codeql-scratch/dbs/cpp/working/autobuild/bin/cc -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/benchmark_profile.dir/link.d CMakeFiles/benchmark_profile.dir/benchmark_profile.c.o -o benchmark_profile  -Wl,-rpath,/home/runner/work/apriltag/apriltag/_codeql_build_dir libapriltag.so.3.4.5 -lm
