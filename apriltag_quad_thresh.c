@@ -1793,41 +1793,42 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
                                                                         \
                 if (v0 + v1 == 255) {                                   \
                     uint32_t label1 = ccl_get_label(ccl, x + dx, y + dy); \
-                    if (label1 == 0) break;                              \
-                    uint64_t rep1 = ccl_get_representative(ccl, label1); \
-                    if (ccl_get_component_size(ccl, rep1) > 24) {        \
-                        uint64_t clusterid;                                 \
-                        if (rep0 < rep1)                                    \
-                            clusterid = (rep1 << 32) + rep0;                \
-                        else                                                \
-                            clusterid = (rep0 << 32) + rep1;                \
-                                                                            \
-                        /* XXX lousy hash function */                       \
-                        uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
-                        struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
-                        while (entry && entry->id != clusterid) {           \
-                            entry = entry->next;                            \
+                    if (label1 != 0) {                                   \
+                        uint64_t rep1 = ccl_get_representative(ccl, label1); \
+                        if (ccl_get_component_size(ccl, rep1) > 24) {        \
+                            uint64_t clusterid;                                 \
+                            if (rep0 < rep1)                                    \
+                                clusterid = (rep1 << 32) + rep0;                \
+                            else                                                \
+                                clusterid = (rep0 << 32) + rep1;                \
+                                                                                \
+                            /* XXX lousy hash function */                       \
+                            uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
+                            struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
+                            while (entry && entry->id != clusterid) {           \
+                                entry = entry->next;                            \
+                            }                                                   \
+                                                                                \
+                            if (!entry) {                                       \
+                                if (mem_pool_loc == mem_chunk_size) {           \
+                                    mem_pool_loc = 0;                           \
+                                    mem_pool_idx++;                             \
+                                    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
+                                }                                               \
+                                entry = mem_pools[mem_pool_idx] + mem_pool_loc; \
+                                mem_pool_loc++;                                 \
+                                                                                \
+                                entry->id = clusterid;                          \
+                                entry->cluster = zarray_create(sizeof(struct pt)); \
+                                entry->next = clustermap[clustermap_bucket];    \
+                                clustermap[clustermap_bucket] = entry;          \
+                            }                                                   \
+                                                                                \
+                            struct pt p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
+                            zarray_add(entry->cluster, &p);                     \
+                            connected = true;                                   \
                         }                                                   \
-                                                                            \
-                        if (!entry) {                                       \
-                            if (mem_pool_loc == mem_chunk_size) {           \
-                                mem_pool_loc = 0;                           \
-                                mem_pool_idx++;                             \
-                                mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
-                            }                                               \
-                            entry = mem_pools[mem_pool_idx] + mem_pool_loc; \
-                            mem_pool_loc++;                                 \
-                                                                            \
-                            entry->id = clusterid;                          \
-                            entry->cluster = zarray_create(sizeof(struct pt)); \
-                            entry->next = clustermap[clustermap_bucket];    \
-                            clustermap[clustermap_bucket] = entry;          \
-                        }                                                   \
-                                                                            \
-                        struct pt p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
-                        zarray_add(entry->cluster, &p);                     \
-                        connected = true;                                   \
-                    }                                                   \
+                    }                                                       \
                 }                                                       \
             }
 
@@ -1971,10 +1972,16 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
 
     workerpool_run(td->wp);
 
+    fprintf(stderr, "gradient_clusters_ccl: All tasks complete, ntasks=%d\n", ntasks);
+    fflush(stderr);
+
     zarray_t** clusters_list = malloc(sizeof(zarray_t *)*ntasks);
     for (int i = 0; i < ntasks; i++) {
         clusters_list[i] = tasks[i].clusters;
     }
+
+    fprintf(stderr, "gradient_clusters_ccl: Starting merge, length=%d\n", ntasks);
+    fflush(stderr);
 
     int length = ntasks;
     while (length > 1) {
@@ -1991,6 +1998,9 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
         length = (length >> 1) + length % 2;
     }
 
+    fprintf(stderr, "gradient_clusters_ccl: Merge complete, creating final clusters array\n");
+    fflush(stderr);
+
     clusters = zarray_create(sizeof(zarray_t*));
     zarray_ensure_capacity(clusters, zarray_size(clusters_list[0]));
     for (int i = 0; i < zarray_size(clusters_list[0]); i++) {
@@ -2000,10 +2010,16 @@ zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, i
         free(*hash);
     }
 
+    fprintf(stderr, "gradient_clusters_ccl: Cleaning up\n");
+    fflush(stderr);
+
     zarray_destroy(clusters_list[0]);
     free(clusters_list);
 
     free(tasks);
+
+    fprintf(stderr, "gradient_clusters_ccl: Complete, returning\n");
+    fflush(stderr);
 
     return clusters;
 }
@@ -2142,7 +2158,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     if (td->debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
 
-        uint32_t *colors = (uint32_t*) calloc(w*h, sizeof(*colors));
+        uint32_t *colors = (uint32_t*) calloc(ccl->max_labels, sizeof(*colors));
 
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -2182,7 +2198,12 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     zarray_t* clusters = gradient_clusters_ccl(td, threshim, w, h, ts, ccl);
 
+    fprintf(stderr, "Back from gradient_clusters_ccl, clusters has %d items\n", zarray_size(clusters));
+    fflush(stderr);
+
     if (td->debug) {
+        fprintf(stderr, "Debug mode: creating visualization\n");
+        fflush(stderr);
         image_u8x3_t *d = image_u8x3_create(w, h);
 
         for (int i = 0; i < zarray_size(clusters); i++) {
@@ -2218,13 +2239,22 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     image_u8_destroy(threshim);
     timeprofile_stamp(td->tp, "make clusters");
 
+    fprintf(stderr, "About to call fit_quads\n");
+    fflush(stderr);
+
     ////////////////////////////////////////////////////////
     // step 3. process each connected component.
 
     zarray_t* quads = fit_quads(td, w, h, clusters, im);
 
+    fprintf(stderr, "fit_quads returned\n");
+    fflush(stderr);
+
     // Clean up CCL structure
     ccl_destroy(ccl);
+
+    fprintf(stderr, "ccl_destroy complete\n");
+    fflush(stderr);
 
     if (td->debug) {
         FILE *f = fopen("debug_lines.ps", "w");
@@ -2267,8 +2297,6 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     }
 
     timeprofile_stamp(td->tp, "fit quads to clusters");
-
-    ccl_destroy(ccl);
 
     for (int i = 0; i < zarray_size(clusters); i++) {
         zarray_t *cluster;

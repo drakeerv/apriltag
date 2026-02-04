@@ -28,6 +28,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "ccl.h"
 #include <string.h>
 #include <assert.h>
+#include <stdio.h>
 
 ccl_component_t *ccl_create(int width, int height) {
     ccl_component_t *ccl = (ccl_component_t *)calloc(1, sizeof(ccl_component_t));

@@ -63,7 +63,11 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim);
 
 // Get the root label for a given label (after processing)
 static inline uint32_t ccl_get_representative(ccl_component_t *ccl, uint32_t label) {
-    while (ccl->equiv[label] != label) {
+    // Safety check for invalid labels
+    if (label >= ccl->max_labels) {
+        return 0; // Return background for invalid label
+    }
+    while (label < ccl->max_labels && ccl->equiv[label] != label) {
         label = ccl->equiv[label];
     }
     return label;
@@ -78,6 +82,10 @@ static inline uint32_t ccl_get_component_size(ccl_component_t *ccl, uint32_t lab
 
 // Get the label for a specific pixel
 static inline uint32_t ccl_get_label(ccl_component_t *ccl, int x, int y) {
+    // Add bounds checking for safety
+    if (x < 0 || x >= ccl->width || y < 0 || y >= ccl->height) {
+        return 0; // Return background label for out-of-bounds access
+    }
     return ccl->labels[y * ccl->width + x];
 }
 
