@@ -98,22 +98,30 @@ set_target_properties(${PROJECT_NAME} PROPERTIES SOVERSION 3 VERSION ${PROJECT_V
 set_target_properties(${PROJECT_NAME} PROPERTIES DEBUG_POSTFIX "d")
 set_property(TARGET ${PROJECT_NAME} PROPERTY C_STANDARD 99)
 
+# SIMD optimization options
+option(APRILTAG_ENABLE_SIMD "Enable SIMD optimizations (ARM NEON, x86 SSE/AVX)" ON)
+option(APRILTAG_ENABLE_FAST_MATH "Enable fast-math optimizations (may affect precision)" ON)
+
 # Add SIMD optimization flags
 if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
-    if(CMAKE_BUILD_TYPE MATCHES "Release")
+    if(CMAKE_BUILD_TYPE MATCHES "Release" AND APRILTAG_ENABLE_SIMD)
         # Enable SIMD and vectorization
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)")
-            # ARM NEON support
-            target_compile_options(${PROJECT_NAME} PRIVATE -march=armv8-a+simd)
+            # ARM NEON support - use conservative flags for compatibility
+            target_compile_options(${PROJECT_NAME} PRIVATE -march=armv8-a)
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7)")
             # ARMv7 NEON support
-            target_compile_options(${PROJECT_NAME} PRIVATE -mfpu=neon -march=armv7-a)
+            target_compile_options(${PROJECT_NAME} PRIVATE -mfpu=neon)
         else()
             # x86/x64 - use native arch which will enable SSE/AVX as available
             target_compile_options(${PROJECT_NAME} PRIVATE -march=native -mtune=native)
         endif()
-        # Additional vectorization hints
-        target_compile_options(${PROJECT_NAME} PRIVATE -ftree-vectorize -ffast-math)
+        # Enable auto-vectorization
+        target_compile_options(${PROJECT_NAME} PRIVATE -ftree-vectorize)
+        # Enable fast-math if requested (may reduce precision, see README)
+        if(APRILTAG_ENABLE_FAST_MATH)
+            target_compile_options(${PROJECT_NAME} PRIVATE -ffast-math)
+        endif()
     endif()
 endif()
 

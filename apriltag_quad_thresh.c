@@ -1111,7 +1111,8 @@ void do_minmax_task(void *p)
         const int tile_y = ty * tilesz;
         const int tile_x = tx * tilesz;
         
-        // For 4x4 tiles with non-contiguous memory, use optimized scalar code
+        // For 4x4 tiles with non-contiguous memory, scalar code with
+        // loop unrolling provides better performance than SIMD gathering
         // Initialize with first pixel
         const uint8_t *row0 = &im->buf[tile_y * s + tile_x];
         uint8_t min = row0[0];
@@ -1352,10 +1353,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
                 int thresh = min + (max - min) / 2;
 
                 uint8_t v = im->buf[y*s+x];
-                if (v > thresh)
-                    threshim->buf[y*s+x] = 255;
-                else
-                    threshim->buf[y*s+x] = 0;
+                threshim->buf[y*s+x] = (v > thresh) ? 255 : 0;
             }
         }
     }

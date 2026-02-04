@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "apriltag.h"
 #include "tag36h11.h"
