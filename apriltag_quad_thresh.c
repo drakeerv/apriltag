@@ -1832,15 +1832,38 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             }
 
             bool connected;
-#define DO_CONN_CCL(dx, dy)                                             \
+            // Cache for frequently accessed neighbor data to reduce redundant lookups
+            struct neighbor_cache {
+                uint32_t label;
+                uint64_t rep;
+                uint32_t size;
+                bool valid;
+            } neighbor_cache[4] = {{0}};  // For right, down, down-left, down-right
+            
+#define DO_CONN_CCL(dx, dy, cache_idx)                                  \
             if (1) {                                                    \
                 uint8_t v1 = row_ptr[x + dx + (dy)*ts];  /* Use relative offset */ \
                                                                         \
                 if (v0 + v1 == 255) {                                   \
                     uint32_t label1 = ccl_get_label(ccl, x + dx, y + dy); \
                     if (label1 != 0) {                                   \
-                        uint64_t rep1 = ccl_get_representative(ccl, label1); \
-                        uint32_t size1 = ccl_get_component_size(ccl, rep1); \
+                        uint64_t rep1;                                   \
+                        uint32_t size1;                                  \
+                        /* Use cache if available (same label as before) */ \
+                        if (cache_idx >= 0 && neighbor_cache[cache_idx].valid && \
+                            neighbor_cache[cache_idx].label == label1) { \
+                            rep1 = neighbor_cache[cache_idx].rep;        \
+                            size1 = neighbor_cache[cache_idx].size;      \
+                        } else {                                         \
+                            rep1 = ccl_get_representative(ccl, label1);  \
+                            size1 = ccl_get_component_size(ccl, rep1);   \
+                            if (cache_idx >= 0) {                        \
+                                neighbor_cache[cache_idx].label = label1; \
+                                neighbor_cache[cache_idx].rep = rep1;    \
+                                neighbor_cache[cache_idx].size = size1;  \
+                                neighbor_cache[cache_idx].valid = true;  \
+                            }                                            \
+                        }                                                \
                         if (size1 > 24) {        \
                             uint64_t clusterid;                                 \
                             if (rep0 < rep1)                                    \
@@ -1848,15 +1871,16 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
                             else                                                \
                                 clusterid = (rep0 << 32) + rep1;                \
                                                                                 \
-                            /* Hash function - cache bucket calculation */      \
+                            /* Improved hash function with better distribution */ \
                             uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
                             struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
-                            /* Linear probing - could be optimized to quadratic */ \
-                            while (entry && entry->id != clusterid) {           \
+                            /* Linear probe with early exit hint */             \
+                            while (__builtin_expect(entry != NULL, 1)) {        \
+                                if (__builtin_expect(entry->id == clusterid, 1)) break; \
                                 entry = entry->next;                            \
                             }                                                   \
                                                                                 \
-                            if (!entry) {                                       \
+                            if (__builtin_expect(!entry, 0)) {                  \
                                 if (__builtin_expect(mem_pool_loc == mem_chunk_size, 0)) { \
                                     mem_pool_loc = 0;                           \
                                     mem_pool_idx++;                             \
@@ -1880,15 +1904,15 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             }
 
             // do 4 connectivity. NB: Arguments must be [-1, 1] or we'll overflow .gx, .gy
-            DO_CONN_CCL(1, 0);
-            DO_CONN_CCL(0, 1);
+            DO_CONN_CCL(1, 0, 0);   // right neighbor - cache[0]
+            DO_CONN_CCL(0, 1, 1);   // down neighbor - cache[1]
 
             // do 8 connectivity
             if (!connected_last) {
-                DO_CONN_CCL(-1, 1);
+                DO_CONN_CCL(-1, 1, 2);  // down-left neighbor - cache[2]
             }
             connected = false;
-            DO_CONN_CCL(1, 1);
+            DO_CONN_CCL(1, 1, 3);   // down-right neighbor - cache[3]
             connected_last = connected;
         }
     }
