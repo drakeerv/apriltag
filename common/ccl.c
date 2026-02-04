@@ -156,44 +156,73 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
             
             uint32_t min_label = 0;
             
-            // Check 4-connected neighbors: left, top-left, top, top-right
-            // For AprilTag, we use 8-connectivity for white pixels
+            // Decision tree approach: Most pixels connect to left or top neighbor
+            // Check most common cases first to minimize branches
             
-            // Left neighbor
+            // Pre-load all neighbor values and labels for better pipelining
+            uint8_t left_val = cur_row[x - 1];
+            uint8_t top_val = prev_row[x];
             uint32_t left_label = label_row[x - 1];
-            if (cur_row[x - 1] == val && left_label != 0) {
-                min_label = left_label;
-            }
-            
-            // Top neighbor
             uint32_t top_label = prev_label_row[x];
-            if (prev_row[x] == val && top_label != 0) {
-                if (min_label == 0) {
-                    min_label = top_label;
-                } else if (top_label != min_label) {
-                    merge_labels(equiv, min_label, top_label);
-                }
-            }
             
-            // For white pixels (255), check diagonal neighbors for 8-connectivity
-            if (__builtin_expect(val == 255, 1)) {  // Likely: most foreground pixels are white
-                // Top-left neighbor
-                uint32_t top_left_label = prev_label_row[x - 1];
-                if (prev_row[x - 1] == val && top_left_label != 0) {
-                    if (min_label == 0) {
-                        min_label = top_left_label;
-                    } else if (top_left_label != min_label) {
-                        merge_labels(equiv, min_label, top_left_label);
-                    }
+            // Fast path: Check left neighbor first (most common case)
+            if (left_val == val && left_label != 0) {
+                min_label = left_label;
+                
+                // Check if top also matches - need to merge if different
+                if (__builtin_expect(top_val == val && top_label != 0 && top_label != left_label, 0)) {
+                    merge_labels(equiv, left_label, top_label);
                 }
                 
-                // Top-right neighbor
-                uint32_t top_right_label = prev_label_row[x + 1];
-                if (prev_row[x + 1] == val && top_right_label != 0) {
-                    if (min_label == 0) {
-                        min_label = top_right_label;
-                    } else if (top_right_label != min_label) {
+                // For white pixels, check diagonals (8-connectivity)
+                if (__builtin_expect(val == 255, 1)) {
+                    uint8_t top_left_val = prev_row[x - 1];
+                    uint32_t top_left_label = prev_label_row[x - 1];
+                    if (top_left_val == val && top_left_label != 0 && top_left_label != min_label) {
+                        merge_labels(equiv, min_label, top_left_label);
+                    }
+                    
+                    uint8_t top_right_val = prev_row[x + 1];
+                    uint32_t top_right_label = prev_label_row[x + 1];
+                    if (top_right_val == val && top_right_label != 0 && top_right_label != min_label) {
                         merge_labels(equiv, min_label, top_right_label);
+                    }
+                }
+            } else if (top_val == val && top_label != 0) {
+                // Second most common: top neighbor only
+                min_label = top_label;
+                
+                // For white pixels, check diagonals
+                if (__builtin_expect(val == 255, 1)) {
+                    uint8_t top_left_val = prev_row[x - 1];
+                    uint32_t top_left_label = prev_label_row[x - 1];
+                    if (top_left_val == val && top_left_label != 0 && top_left_label != min_label) {
+                        merge_labels(equiv, min_label, top_left_label);
+                    }
+                    
+                    uint8_t top_right_val = prev_row[x + 1];
+                    uint32_t top_right_label = prev_label_row[x + 1];
+                    if (top_right_val == val && top_right_label != 0 && top_right_label != min_label) {
+                        merge_labels(equiv, min_label, top_right_label);
+                    }
+                }
+            } else if (__builtin_expect(val == 255, 1)) {
+                // Rare case: no 4-connected neighbor, check diagonals for white pixels
+                uint8_t top_left_val = prev_row[x - 1];
+                uint32_t top_left_label = prev_label_row[x - 1];
+                if (top_left_val == val && top_left_label != 0) {
+                    min_label = top_left_label;
+                    
+                    uint8_t top_right_val = prev_row[x + 1];
+                    uint32_t top_right_label = prev_label_row[x + 1];
+                    if (top_right_val == val && top_right_label != 0 && top_right_label != min_label) {
+                        merge_labels(equiv, min_label, top_right_label);
+                    }
+                } else {
+                    uint8_t top_right_val = prev_row[x + 1];
+                    uint32_t top_right_label = prev_label_row[x + 1];
+                    if (top_right_val == val && top_right_label != 0) {
+                        min_label = top_right_label;
                     }
                 }
             }
