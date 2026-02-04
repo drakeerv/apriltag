@@ -34,6 +34,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/image_u8.h"
 #include "common/pnm.h"
 #include "common/math_util.h"
+#include "apriltag_simd.h"
 
 // least common multiple of 64 (sandy bridge cache line) and 24 (stride
 // needed for RGB in 8-wide vector processing)
@@ -491,15 +492,39 @@ image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
     int swidth = 1 + (width - 1)/factor;
     int sheight = 1 + (height - 1)/factor;
     image_u8_t *decim = image_u8_create(swidth, sheight);
+    
+    // Optimized path with better memory access patterns
     int sy = 0;
     for (int y = 0; y < height; y += factor) {
+        const uint8_t *src_row = &im->buf[y * im->stride];
+        uint8_t *dst_row = &decim->buf[sy * decim->stride];
+        
         int sx = 0;
-        for (int x = 0; x < width; x += factor) {
-            decim->buf[sy*decim->stride + sx] = im->buf[y*im->stride + x];
-            sx++;
+        int x = 0;
+        
+#if defined(APRILTAG_USE_NEON) || defined(APRILTAG_USE_SSE2)
+        // SIMD path: process 16 pixels at a time
+        for (; x + 16 * factor <= width; x += 16 * factor, sx += 16) {
+            // Gather 16 pixels with stride 'factor'
+            uint8_t pixels[16];
+            for (int i = 0; i < 16; i++) {
+                pixels[i] = src_row[x + i * factor];
+            }
+            
+            // Store using SIMD
+            simd_u8x16_t v_pixels = simd_load_u8x16(pixels);
+            simd_store_u8x16(&dst_row[sx], v_pixels);
         }
+#endif
+        
+        // Scalar remainder
+        for (; x < width; x += factor, sx++) {
+            dst_row[sx] = src_row[x];
+        }
+        
         sy++;
     }
+    
     return decim;
 }
 
