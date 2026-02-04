@@ -1833,6 +1833,12 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
 
             bool connected;
             // Cache for frequently accessed neighbor data to reduce redundant lookups
+            // Cache indices for each neighbor direction
+            #define CACHE_RIGHT 0
+            #define CACHE_DOWN 1
+            #define CACHE_DOWN_LEFT 2
+            #define CACHE_DOWN_RIGHT 3
+            
             struct neighbor_cache {
                 uint32_t label;
                 uint64_t rep;
@@ -1904,16 +1910,21 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             }
 
             // do 4 connectivity. NB: Arguments must be [-1, 1] or we'll overflow .gx, .gy
-            DO_CONN_CCL(1, 0, 0);   // right neighbor - cache[0]
-            DO_CONN_CCL(0, 1, 1);   // down neighbor - cache[1]
+            DO_CONN_CCL(1, 0, CACHE_RIGHT);
+            DO_CONN_CCL(0, 1, CACHE_DOWN);
 
             // do 8 connectivity
             if (!connected_last) {
-                DO_CONN_CCL(-1, 1, 2);  // down-left neighbor - cache[2]
+                DO_CONN_CCL(-1, 1, CACHE_DOWN_LEFT);
             }
             connected = false;
-            DO_CONN_CCL(1, 1, 3);   // down-right neighbor - cache[3]
+            DO_CONN_CCL(1, 1, CACHE_DOWN_RIGHT);
             connected_last = connected;
+            
+            #undef CACHE_RIGHT
+            #undef CACHE_DOWN
+            #undef CACHE_DOWN_LEFT
+            #undef CACHE_DOWN_RIGHT
         }
     }
 #undef DO_CONN_CCL

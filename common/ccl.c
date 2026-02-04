@@ -158,6 +158,8 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
             
             // Decision tree approach: Most pixels connect to left or top neighbor
             // Check most common cases first to minimize branches
+            // Note: Diagonal checks are duplicated in each branch intentionally -
+            // this allows for better branch prediction and avoids extra conditionals
             
             // Pre-load all neighbor values and labels for better pipelining
             uint8_t left_val = cur_row[x - 1];
