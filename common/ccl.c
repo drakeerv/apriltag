@@ -32,26 +32,60 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <limits.h>
 
 ccl_component_t *ccl_create(int width, int height) {
+    // Check for overflow in size calculations
+    size_t num_pixels = (size_t)width * (size_t)height;
+    if (num_pixels / (size_t)width != (size_t)height) {
+        return NULL; // Overflow detected
+    }
+    
+    // Check if max_labels will fit in uint32_t
+    size_t max_labels_size = num_pixels / 2 + 1;
+    if (max_labels_size > UINT32_MAX) {
+        return NULL; // Too many labels for uint32_t
+    }
+    
     ccl_component_t *ccl = (ccl_component_t *)calloc(1, sizeof(ccl_component_t));
+    if (!ccl) return NULL;
+    
     ccl->width = width;
     ccl->height = height;
     
     // Allocate label array for all pixels
-    ccl->labels = (uint32_t *)calloc(width * height, sizeof(uint32_t));
-    
-    // Allocate equivalence table (worst case: every other pixel is a new component)
-    ccl->max_labels = (width * height) / 2 + 1;
-    ccl->equiv = (uint32_t *)malloc(ccl->max_labels * sizeof(uint32_t));
-    ccl->comp_size = (uint32_t *)calloc(ccl->max_labels, sizeof(uint32_t));
-    ccl->stats = (ccl_component_stats_t *)calloc(ccl->max_labels, sizeof(ccl_component_stats_t));
-    
-    // Initialize equivalence table (each label points to itself initially)
-    for (uint32_t i = 0; i < ccl->max_labels; i++) {
-        ccl->equiv[i] = i;
+    ccl->labels = (uint32_t *)calloc(num_pixels, sizeof(uint32_t));
+    if (!ccl->labels) {
+        free(ccl);
+        return NULL;
     }
     
-    // Initialize stats bounding boxes to invalid values
+    // Allocate equivalence table (worst case: every other pixel is a new component)
+    ccl->max_labels = (uint32_t)max_labels_size;
+    ccl->equiv = (uint32_t *)malloc(ccl->max_labels * sizeof(uint32_t));
+    if (!ccl->equiv) {
+        free(ccl->labels);
+        free(ccl);
+        return NULL;
+    }
+    
+    ccl->comp_size = (uint32_t *)calloc(ccl->max_labels, sizeof(uint32_t));
+    if (!ccl->comp_size) {
+        free(ccl->equiv);
+        free(ccl->labels);
+        free(ccl);
+        return NULL;
+    }
+    
+    ccl->stats = (ccl_component_stats_t *)calloc(ccl->max_labels, sizeof(ccl_component_stats_t));
+    if (!ccl->stats) {
+        free(ccl->comp_size);
+        free(ccl->equiv);
+        free(ccl->labels);
+        free(ccl);
+        return NULL;
+    }
+    
+    // Initialize equivalence table and stats in a single loop for better cache locality
     for (uint32_t i = 0; i < ccl->max_labels; i++) {
+        ccl->equiv[i] = i;
         ccl->stats[i].min_x = UINT32_MAX;
         ccl->stats[i].min_y = UINT32_MAX;
         ccl->stats[i].max_x = 0;

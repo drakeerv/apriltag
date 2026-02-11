@@ -1648,6 +1648,9 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
 // New CCL-based connected components function
 ccl_component_t* connected_components_ccl(apriltag_detector_t *td __attribute__((unused)), image_u8_t* threshim, int w, int h, int ts __attribute__((unused))) {
     ccl_component_t *ccl = ccl_create(w, h);
+    if (!ccl) {
+        return NULL; // Allocation failed
+    }
     ccl_process(ccl, threshim);
     return ccl;
 }
@@ -1799,12 +1802,26 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
 // CCL-compatible version of do_gradient_clusters
 zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, ccl_component_t* ccl, zarray_t* clusters) {
     struct uint64_zarray_entry **clustermap = calloc(nclustermap, sizeof(struct uint64_zarray_entry*));
+    if (!clustermap) {
+        return clusters; // Allocation failed, return what we have
+    }
 
     int mem_chunk_size = 2048;
-    struct uint64_zarray_entry** mem_pools = malloc(sizeof(struct uint64_zarray_entry *)*(1 + 2 * nclustermap / mem_chunk_size));
+    int max_pools = 1 + 2 * nclustermap / mem_chunk_size;
+    struct uint64_zarray_entry** mem_pools = malloc(sizeof(struct uint64_zarray_entry *) * max_pools);
+    if (!mem_pools) {
+        free(clustermap);
+        return clusters;
+    }
+    
     int mem_pool_idx = 0;
     int mem_pool_loc = 0;
     mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry));
+    if (!mem_pools[mem_pool_idx]) {
+        free(mem_pools);
+        free(clustermap);
+        return clusters;
+    }
 
     for (int y = y0; y < y1; y++) {
         bool connected_last = false;
@@ -1847,7 +1864,7 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             } neighbor_cache[4] = {{0}};  // For right, down, down-left, down-right
             
 #define DO_CONN_CCL(dx, dy, cache_idx)                                  \
-            if (1) {                                                    \
+            do {                                                        \
                 uint8_t v1 = row_ptr[x + dx + (dy)*ts];  /* Use relative offset */ \
                                                                         \
                 if (v0 + v1 == 255) {                                   \
@@ -1891,6 +1908,10 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
                                     mem_pool_loc = 0;                           \
                                     mem_pool_idx++;                             \
                                     mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
+                                    if (!mem_pools[mem_pool_idx]) {             \
+                                        /* Allocation failed, skip this entry */ \
+                                        break; /* Break from do-while */        \
+                                    }                                           \
                                 }                                               \
                                 entry = mem_pools[mem_pool_idx] + mem_pool_loc; \
                                 mem_pool_loc++;                                 \
@@ -1907,7 +1928,7 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
                         }                                                   \
                     }                                                       \
                 }                                                       \
-            }
+            } while (0)
 
             // do 4 connectivity. NB: Arguments must be [-1, 1] or we'll overflow .gx, .gy
             DO_CONN_CCL(1, 0, CACHE_RIGHT);
@@ -2220,6 +2241,11 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     ////////////////////////////////////////////////////////
     // step 2. find connected components using CCL.
     ccl_component_t* ccl = connected_components_ccl(td, threshim, w, h, ts);
+    if (!ccl) {
+        // Allocation failed - clean up and return empty result
+        image_u8_destroy(threshim);
+        return zarray_create(sizeof(struct quad));
+    }
 
     // make segmentation image.
     if (td->debug) {
