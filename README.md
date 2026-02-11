@@ -61,6 +61,33 @@ to generate and compile via the ninja build script. It will be much faster than 
 
 You can omit `--target install` if you only want to use this locally without installing.
 
+### SIMD Optimizations
+
+This fork includes optimizations for ARM NEON and x86 SSE2/AVX instruction sets to improve detection performance on embedded systems like the Raspberry Pi 5. The optimizations are automatically enabled when building in Release mode and include:
+
+- **Automatic architecture detection**: The build system automatically detects and enables the appropriate SIMD instructions for your CPU (ARM NEON on Raspberry Pi, SSE2/AVX on x86).
+- **Compiler auto-vectorization**: Aggressive optimization flags (`-march=native`, `-ftree-vectorize`) enable the compiler to automatically vectorize loops.
+- **Cross-platform SIMD wrapper**: A lightweight SIMD abstraction layer (`apriltag_simd.h`) provides consistent API across ARM and x86 architectures.
+- **Fast-math optimizations**: Optional `-ffast-math` flag for additional performance (enabled by default, may reduce floating-point precision).
+
+To build with optimizations:
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+To disable SIMD or fast-math optimizations:
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAPRILTAG_ENABLE_SIMD=OFF
+# or
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAPRILTAG_ENABLE_FAST_MATH=OFF
+```
+
+To benchmark detection performance, use the included benchmark tool:
+```
+./build/benchmark_profile <image_path> [iterations]
+```
+
 
 Usage
 =====

@@ -36,9 +36,11 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdint.h>
 
 #include "apriltag.h"
+#include "apriltag_simd.h"
 #include "common/image_u8x3.h"
 #include "common/zarray.h"
 #include "common/unionfind.h"
+#include "common/ccl.h"
 #include "common/timeprofile.h"
 #include "common/zmaxheap.h"
 #include "common/postscript_utils.h"
@@ -622,6 +624,12 @@ struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
     struct line_fit_pt *lfps = calloc(sz, sizeof(struct line_fit_pt));
     double sum_Mx = 0, sum_My = 0, sum_Mxx = 0, sum_Myy = 0, sum_Mxy = 0, sum_W = 0;
 
+    // Cache image stride and buffer pointer
+    const int stride = im->stride;
+    const uint8_t* __restrict buf = im->buf;  // restrict keyword for better optimization
+    const int width = im->width;
+    const int height = im->height;
+
     for (int i = 0; i < sz; i++) {
         struct pt *p;
         zarray_get_volatile(cluster, i, &p);
@@ -633,14 +641,15 @@ struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
         int ix = x, iy = y;
         double W = 1;
 
-        if (ix > 0 && ix+1 < im->width && iy > 0 && iy+1 < im->height) {
-            int grad_x = im->buf[iy * im->stride + ix + 1] -
-                im->buf[iy * im->stride + ix - 1];
-
-            int grad_y = im->buf[(iy+1) * im->stride + ix] -
-                im->buf[(iy-1) * im->stride + ix];
+        // Cache condition check - unlikely to be at border
+        if (__builtin_expect((ix > 0 && ix+1 < width && iy > 0 && iy+1 < height), 1)) {
+            int offset = iy * stride + ix;
+            // Compute gradients with cached offset
+            int grad_x = buf[offset + 1] - buf[offset - 1];
+            int grad_y = buf[offset + stride] - buf[offset - stride];
 
             // XXX Tunable. How to shape the gradient magnitude?
+            // sqrt is expensive, but necessary for this calculation
             W = sqrt(grad_x*grad_x + grad_y*grad_y) + 1;
         }
 
@@ -795,21 +804,53 @@ int fit_quad(
     uint16_t xmin = p1->x;
     uint16_t ymax = p1->y;
     uint16_t ymin = p1->y;
-    for (int pidx = 1; pidx < zarray_size(cluster); pidx++) {
+    
+    // Unroll loop for better performance - process 4 points at a time when possible
+    int pidx = 1;
+    for (; pidx + 3 < sz; pidx += 4) {
+        struct pt *p0, *p1, *p2, *p3;
+        zarray_get_volatile(cluster, pidx, &p0);
+        zarray_get_volatile(cluster, pidx + 1, &p1);
+        zarray_get_volatile(cluster, pidx + 2, &p2);
+        zarray_get_volatile(cluster, pidx + 3, &p3);
+        
+        // Process 4 points - compiler may vectorize this
+        uint16_t x0 = p0->x, x1 = p1->x, x2 = p2->x, x3 = p3->x;
+        uint16_t y0 = p0->y, y1 = p1->y, y2 = p2->y, y3 = p3->y;
+        
+        // Find local min/max for these 4 points
+        uint16_t local_xmin = x0 < x1 ? x0 : x1;
+        local_xmin = x2 < local_xmin ? x2 : local_xmin;
+        local_xmin = x3 < local_xmin ? x3 : local_xmin;
+        
+        uint16_t local_xmax = x0 > x1 ? x0 : x1;
+        local_xmax = x2 > local_xmax ? x2 : local_xmax;
+        local_xmax = x3 > local_xmax ? x3 : local_xmax;
+        
+        uint16_t local_ymin = y0 < y1 ? y0 : y1;
+        local_ymin = y2 < local_ymin ? y2 : local_ymin;
+        local_ymin = y3 < local_ymin ? y3 : local_ymin;
+        
+        uint16_t local_ymax = y0 > y1 ? y0 : y1;
+        local_ymax = y2 > local_ymax ? y2 : local_ymax;
+        local_ymax = y3 > local_ymax ? y3 : local_ymax;
+        
+        // Update global min/max
+        xmin = local_xmin < xmin ? local_xmin : xmin;
+        xmax = local_xmax > xmax ? local_xmax : xmax;
+        ymin = local_ymin < ymin ? local_ymin : ymin;
+        ymax = local_ymax > ymax ? local_ymax : ymax;
+    }
+    
+    // Handle remaining points
+    for (; pidx < sz; pidx++) {
         struct pt *p;
         zarray_get_volatile(cluster, pidx, &p);
 
-        if (p->x > xmax) {
-            xmax = p->x;
-        } else if (p->x < xmin) {
-            xmin = p->x;
-        }
-
-        if (p->y > ymax) {
-            ymax = p->y;
-        } else if (p->y < ymin) {
-            ymin = p->y;
-        }
+        xmin = p->x < xmin ? p->x : xmin;
+        xmax = p->x > xmax ? p->x : xmax;
+        ymin = p->y < ymin ? p->y : ymin;
+        ymax = p->y > ymax ? p->y : ymax;
     }
 
     if ((xmax - xmin)*(ymax - ymin) < tag_width) {
@@ -828,7 +869,9 @@ int fit_quad(
 
     float quadrants[2][2] = {{-1*(2 << 15), 0}, {2*(2 << 15), 2 << 15}};
 
-    for (int pidx = 0; pidx < zarray_size(cluster); pidx++) {
+    // Cache sz to avoid repeated function call
+    int cluster_sz = sz;
+    for (int pidx = 0; pidx < cluster_sz; pidx++) {
         struct pt *p;
         zarray_get_volatile(cluster, pidx, &p);
 
@@ -838,16 +881,17 @@ int fit_quad(
         dot += dx*p->gx + dy*p->gy;
 
         float quadrant = quadrants[dy > 0][dx > 0];
-        if (dy < 0) {
-            dy = -dy;
-            dx = -dx;
-        }
+        
+        // Branchless absolute value and quadrant adjustment
+        int dy_negative = (dy < 0);
+        dy = dy_negative ? -dy : dy;
+        dx = dy_negative ? -dx : dx;
 
-        if (dx < 0) {
-            float tmp = dx;
-            dx = dy;
-            dy = -tmp;
-        }
+        int dx_negative = (dx < 0);
+        float tmp = dx;
+        dx = dx_negative ? dy : dx;
+        dy = dx_negative ? -tmp : dy;
+        
         p->slope = quadrant + dy/dx;
     }
 
@@ -1106,18 +1150,66 @@ void do_minmax_task(void *p)
     int tw = task->im->width / tilesz;
     image_u8_t *im = task->im;
 
-    for (int tx = 0; tx < tw; tx++) {
-        uint8_t max = 0, min = 255;
-
+    const int tile_y = ty * tilesz;
+    
+    int tx = 0;
+    
+#if defined(APRILTAG_USE_NEON) || defined(APRILTAG_USE_SSE2)
+    // SIMD path: process 4 contiguous tiles (16 pixels) at a time per row
+    for (; tx + 4 <= tw; tx += 4) {
+        const int tile_x = tx * tilesz;
+        
+        // Initialize min/max for 16 pixels
+        simd_u8x16_t v_min = simd_set1_u8(255);
+        simd_u8x16_t v_max = simd_set1_u8(0);
+        
+        // Process all 4 rows, loading 16 contiguous pixels each time
         for (int dy = 0; dy < tilesz; dy++) {
-
+            const uint8_t *row = &im->buf[(tile_y + dy) * s + tile_x];
+            
+            // Load 16 contiguous pixels (4 tiles)
+            simd_u8x16_t v_pixels = simd_load_u8x16(row);
+            v_min = simd_min_u8(v_min, v_pixels);
+            v_max = simd_max_u8(v_max, v_pixels);
+        }
+        
+        // Extract results for each of the 4 tiles
+        uint8_t min_vals[16], max_vals[16];
+        simd_store_u8x16(min_vals, v_min);
+        simd_store_u8x16(max_vals, v_max);
+        
+        // Compute min/max for each of the 4 tiles
+        for (int t = 0; t < 4; t++) {
+            uint8_t tile_min = 255;
+            uint8_t tile_max = 0;
+            
+            // Each tile is 4 pixels
+            for (int i = 0; i < tilesz; i++) {
+                int idx = t * tilesz + i;
+                if (min_vals[idx] < tile_min) tile_min = min_vals[idx];
+                if (max_vals[idx] > tile_max) tile_max = max_vals[idx];
+            }
+            
+            task->im_min[ty * tw + tx + t] = tile_min;
+            task->im_max[ty * tw + tx + t] = tile_max;
+        }
+    }
+#endif
+    
+    // Scalar fallback for remaining tiles
+    for (; tx < tw; tx++) {
+        const int tile_x = tx * tilesz;
+        
+        uint8_t min = 255;
+        uint8_t max = 0;
+        
+        for (int dy = 0; dy < tilesz; dy++) {
+            const uint8_t *row = &im->buf[(tile_y + dy) * s + tile_x];
+            
             for (int dx = 0; dx < tilesz; dx++) {
-
-                uint8_t v = im->buf[(ty*tilesz+dy)*s + tx*tilesz + dx];
-                if (v < min)
-                    min = v;
-                if (v > max)
-                    max = v;
+                uint8_t v = row[dx];
+                if (v < min) min = v;
+                if (v > max) max = v;
             }
         }
 
@@ -1197,18 +1289,19 @@ void do_threshold_task(void *p)
         // can be substantially brighter than white tag parts
         uint8_t thresh = min + (max - min) / 2;
 
+        // Scalar path with optimized branching
         for (int dy = 0; dy < tilesz; dy++) {
             int y = ty*tilesz + dy;
-
-            for (int dx = 0; dx < tilesz; dx++) {
-                int x = tx*tilesz + dx;
-
-                uint8_t v = im->buf[y*s+x];
-                if (v > thresh)
-                    threshim->buf[y*s+x] = 255;
-                else
-                    threshim->buf[y*s+x] = 0;
-            }
+            int x_start = tx*tilesz;
+            
+            const uint8_t *in_ptr = &im->buf[y*s+x_start];
+            uint8_t *out_ptr = &threshim->buf[y*s+x_start];
+            
+            // Unroll loop manually for better performance
+            out_ptr[0] = (in_ptr[0] > thresh) ? 255 : 0;
+            out_ptr[1] = (in_ptr[1] > thresh) ? 255 : 0;
+            out_ptr[2] = (in_ptr[2] > thresh) ? 255 : 0;
+            out_ptr[3] = (in_ptr[3] > thresh) ? 255 : 0;
         }
     }
 }
@@ -1337,10 +1430,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
                 int thresh = min + (max - min) / 2;
 
                 uint8_t v = im->buf[y*s+x];
-                if (v > thresh)
-                    threshim->buf[y*s+x] = 255;
-                else
-                    threshim->buf[y*s+x] = 0;
+                threshim->buf[y*s+x] = (v > thresh) ? 255 : 0;
             }
         }
     }
@@ -1555,6 +1645,16 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
     return uf;
 }
 
+// New CCL-based connected components function
+ccl_component_t* connected_components_ccl(apriltag_detector_t *td __attribute__((unused)), image_u8_t* threshim, int w, int h, int ts __attribute__((unused))) {
+    ccl_component_t *ccl = ccl_create(w, h);
+    if (!ccl) {
+        return NULL; // Allocation failed
+    }
+    ccl_process(ccl, threshim);
+    return ccl;
+}
+
 zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, unionfind_t* uf, zarray_t* clusters) {
     struct uint64_zarray_entry **clustermap = calloc(nclustermap, sizeof(struct uint64_zarray_entry*));
 
@@ -1699,11 +1799,230 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
     return clusters;
 }
 
+// CCL-compatible version of do_gradient_clusters
+zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, ccl_component_t* ccl, zarray_t* clusters) {
+    struct uint64_zarray_entry **clustermap = calloc(nclustermap, sizeof(struct uint64_zarray_entry*));
+    if (!clustermap) {
+        return clusters; // Allocation failed, return what we have
+    }
+
+    int mem_chunk_size = 2048;
+    int max_pools = 1 + 2 * nclustermap / mem_chunk_size;
+    struct uint64_zarray_entry** mem_pools = malloc(sizeof(struct uint64_zarray_entry *) * max_pools);
+    if (!mem_pools) {
+        free(clustermap);
+        return clusters;
+    }
+    
+    int mem_pool_idx = 0;
+    int mem_pool_loc = 0;
+    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry));
+    if (!mem_pools[mem_pool_idx]) {
+        free(mem_pools);
+        free(clustermap);
+        return clusters;
+    }
+
+    for (int y = y0; y < y1; y++) {
+        bool connected_last = false;
+        uint8_t* row_ptr = &threshim->buf[y*ts];  // Cache row pointer
+        
+        // Prefetch next row for better cache utilization on Pi5
+        if (__builtin_expect(y + 1 < y1, 1)) {
+            simd_prefetch(&threshim->buf[(y + 1)*ts]);
+        }
+        
+        for (int x = 1; x < w-1; x++) {
+
+            uint8_t v0 = row_ptr[x];  // Use cached pointer
+            if (v0 == 127) {
+                connected_last = false;
+                continue;
+            }
+
+            // Get representative label from CCL
+            uint32_t label0 = ccl_get_label(ccl, x, y);
+            if (label0 == 0) { // Skip background pixels
+                connected_last = false;
+                continue;
+            }
+            uint64_t rep0 = ccl_get_representative(ccl, label0);
+            uint32_t size0 = ccl_get_component_size(ccl, rep0);  // Cache size
+            if (size0 < 25) {
+                connected_last = false;
+                continue;
+            }
+            
+            // Prefetch likely next pixel's label data (spatial coherence)
+            // Prefetch at x+1 to align with pipeline without thrashing cache
+            if (__builtin_expect(x + 1 < w-1, 1)) {
+                // Inline lightweight check before heavier prefetch operations
+                uint32_t next_label = ccl->labels[y * ccl->width + x + 1];
+                if (next_label != 0) {
+                    uint32_t next_rep = ccl->equiv[next_label];
+                    simd_prefetch(&ccl->stats[next_rep]);
+                }
+            }
+
+            bool connected;
+            // Cache for frequently accessed neighbor data to reduce redundant lookups
+            // Cache indices for each neighbor direction
+            #define CACHE_RIGHT 0
+            #define CACHE_DOWN 1
+            #define CACHE_DOWN_LEFT 2
+            #define CACHE_DOWN_RIGHT 3
+            
+            struct neighbor_cache {
+                uint32_t label;
+                uint64_t rep;
+                uint32_t size;
+                bool valid;
+            } neighbor_cache[4] = {{0}};  // For right, down, down-left, down-right
+            
+#define DO_CONN_CCL(dx, dy, cache_idx)                                  \
+            do {                                                        \
+                uint8_t v1 = row_ptr[x + dx + (dy)*ts];  /* Use relative offset */ \
+                                                                        \
+                if (v0 + v1 == 255) {                                   \
+                    uint32_t label1 = ccl_get_label(ccl, x + dx, y + dy); \
+                    if (label1 != 0) {                                   \
+                        uint64_t rep1;                                   \
+                        uint32_t size1;                                  \
+                        /* Use cache if available (same label as before) */ \
+                        if (cache_idx >= 0 && neighbor_cache[cache_idx].valid && \
+                            neighbor_cache[cache_idx].label == label1) { \
+                            rep1 = neighbor_cache[cache_idx].rep;        \
+                            size1 = neighbor_cache[cache_idx].size;      \
+                        } else {                                         \
+                            rep1 = ccl_get_representative(ccl, label1);  \
+                            size1 = ccl_get_component_size(ccl, rep1);   \
+                            if (cache_idx >= 0) {                        \
+                                neighbor_cache[cache_idx].label = label1; \
+                                neighbor_cache[cache_idx].rep = rep1;    \
+                                neighbor_cache[cache_idx].size = size1;  \
+                                neighbor_cache[cache_idx].valid = true;  \
+                            }                                            \
+                        }                                                \
+                        if (size1 > 24) {        \
+                            uint64_t clusterid;                                 \
+                            if (rep0 < rep1)                                    \
+                                clusterid = (rep1 << 32) + rep0;                \
+                            else                                                \
+                                clusterid = (rep0 << 32) + rep1;                \
+                                                                                \
+                            /* Improved hash function with better distribution */ \
+                            uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
+                            struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
+                            /* Linear probe with early exit hint */             \
+                            while (__builtin_expect(entry != NULL, 1)) {        \
+                                if (__builtin_expect(entry->id == clusterid, 1)) break; \
+                                entry = entry->next;                            \
+                            }                                                   \
+                                                                                \
+                            if (__builtin_expect(!entry, 0)) {                  \
+                                if (__builtin_expect(mem_pool_loc == mem_chunk_size, 0)) { \
+                                    mem_pool_loc = 0;                           \
+                                    mem_pool_idx++;                             \
+                                    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
+                                    if (!mem_pools[mem_pool_idx]) {             \
+                                        /* Allocation failed, skip this entry */ \
+                                        break; /* Break from do-while */        \
+                                    }                                           \
+                                }                                               \
+                                entry = mem_pools[mem_pool_idx] + mem_pool_loc; \
+                                mem_pool_loc++;                                 \
+                                                                                \
+                                entry->id = clusterid;                          \
+                                entry->cluster = zarray_create(sizeof(struct pt)); \
+                                entry->next = clustermap[clustermap_bucket];    \
+                                clustermap[clustermap_bucket] = entry;          \
+                            }                                                   \
+                                                                                \
+                            struct pt p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
+                            zarray_add(entry->cluster, &p);                     \
+                            connected = true;                                   \
+                        }                                                   \
+                    }                                                       \
+                }                                                       \
+            } while (0)
+
+            // do 4 connectivity. NB: Arguments must be [-1, 1] or we'll overflow .gx, .gy
+            DO_CONN_CCL(1, 0, CACHE_RIGHT);
+            DO_CONN_CCL(0, 1, CACHE_DOWN);
+
+            // do 8 connectivity
+            if (!connected_last) {
+                DO_CONN_CCL(-1, 1, CACHE_DOWN_LEFT);
+            }
+            connected = false;
+            DO_CONN_CCL(1, 1, CACHE_DOWN_RIGHT);
+            connected_last = connected;
+            
+            #undef CACHE_RIGHT
+            #undef CACHE_DOWN
+            #undef CACHE_DOWN_LEFT
+            #undef CACHE_DOWN_RIGHT
+        }
+    }
+#undef DO_CONN_CCL
+
+    for (int i = 0; i < nclustermap; i++) {
+        int start = zarray_size(clusters);
+        for (struct uint64_zarray_entry *entry = clustermap[i]; entry; entry = entry->next) {
+            struct cluster_hash* cluster_hash = malloc(sizeof(struct cluster_hash));
+            cluster_hash->hash = u64hash_2(entry->id) % nclustermap;
+            cluster_hash->id = entry->id;
+            cluster_hash->data = entry->cluster;
+            zarray_add(clusters, &cluster_hash);
+        }
+        int end = zarray_size(clusters);
+
+        // Do a quick bubblesort on the secondary key.
+        int n = end - start;
+        for (int j = 0; j < n - 1; j++) {
+            for (int k = 0; k < n - j - 1; k++) {
+                struct cluster_hash** hash1;
+                struct cluster_hash** hash2;
+                zarray_get_volatile(clusters, start + k, &hash1);
+                zarray_get_volatile(clusters, start + k + 1, &hash2);
+                if ((*hash1)->id > (*hash2)->id) {
+                    struct cluster_hash tmp = **hash2;
+                    **hash2 = **hash1;
+                    **hash1 = tmp;
+                }
+            }
+        }
+    }
+    for (int i = 0; i <= mem_pool_idx; i++) {
+        free(mem_pools[i]);
+    }
+    free(mem_pools);
+    free(clustermap);
+
+    return clusters;
+}
+
 static void do_cluster_task(void *p)
 {
     struct cluster_task *task = (struct cluster_task*) p;
 
     do_gradient_clusters(task->im, task->s, task->y0, task->y1, task->w, task->nclustermap, task->uf, task->clusters);
+}
+
+struct cluster_task_ccl {
+    int y0, y1;
+    int w, s;
+    int nclustermap;
+    ccl_component_t *ccl;
+    zarray_t *clusters;
+    image_u8_t *im;
+};
+
+static void do_cluster_task_ccl(void *p)
+{
+    struct cluster_task_ccl *task = (struct cluster_task_ccl*) p;
+
+    do_gradient_clusters_ccl(task->im, task->s, task->y0, task->y1, task->w, task->nclustermap, task->ccl, task->clusters);
 }
 
 zarray_t* merge_clusters(zarray_t* c1, zarray_t* c2) {
@@ -1744,6 +2063,69 @@ zarray_t* merge_clusters(zarray_t* c1, zarray_t* c2) {
     zarray_destroy(c2);
 
     return ret;
+}
+
+zarray_t* gradient_clusters_ccl(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts, ccl_component_t* ccl) {
+    zarray_t* clusters;
+    int nclustermap = 0.2*w*h;
+
+    int sz = h - 1;
+    int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+    struct cluster_task_ccl *tasks = malloc(sizeof(struct cluster_task_ccl)*(sz / chunksize + 1));
+
+    int ntasks = 0;
+
+    for (int i = 1; i < sz; i += chunksize) {
+        tasks[ntasks].y0 = i;
+        tasks[ntasks].y1 = imin(sz, i + chunksize);
+        tasks[ntasks].w = w;
+        tasks[ntasks].s = ts;
+        tasks[ntasks].ccl = ccl;
+        tasks[ntasks].im = threshim;
+        tasks[ntasks].nclustermap = nclustermap/(sz / chunksize + 1);
+        tasks[ntasks].clusters = zarray_create(sizeof(struct cluster_hash*));
+
+        workerpool_add_task(td->wp, do_cluster_task_ccl, &tasks[ntasks]);
+        ntasks++;
+    }
+
+    workerpool_run(td->wp);
+
+    zarray_t** clusters_list = malloc(sizeof(zarray_t *)*ntasks);
+    for (int i = 0; i < ntasks; i++) {
+        clusters_list[i] = tasks[i].clusters;
+    }
+
+    int length = ntasks;
+    while (length > 1) {
+        int write = 0;
+        for (int i = 0; i < length - 1; i += 2) {
+            clusters_list[write] = merge_clusters(clusters_list[i], clusters_list[i + 1]);
+            write++;
+        }
+
+        if (length % 2) {
+            clusters_list[write] = clusters_list[length - 1];
+        }
+
+        length = (length >> 1) + length % 2;
+    }
+
+    clusters = zarray_create(sizeof(zarray_t*));
+    zarray_ensure_capacity(clusters, zarray_size(clusters_list[0]));
+    for (int i = 0; i < zarray_size(clusters_list[0]); i++) {
+        struct cluster_hash** hash;
+        zarray_get_volatile(clusters_list[0], i, &hash);
+        zarray_add(clusters, &(*hash)->data);
+        free(*hash);
+    }
+
+    zarray_destroy(clusters_list[0]);
+    free(clusters_list);
+
+    free(tasks);
+
+    return clusters;
 }
 
 zarray_t* gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts, unionfind_t* uf) {
@@ -1873,20 +2255,26 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
 
     ////////////////////////////////////////////////////////
-    // step 2. find connected components.
-    unionfind_t* uf = connected_components(td, threshim, w, h, ts);
+    // step 2. find connected components using CCL.
+    ccl_component_t* ccl = connected_components_ccl(td, threshim, w, h, ts);
+    if (!ccl) {
+        // Allocation failed - clean up and return empty result
+        image_u8_destroy(threshim);
+        return zarray_create(sizeof(struct quad));
+    }
 
     // make segmentation image.
     if (td->debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
 
-        uint32_t *colors = (uint32_t*) calloc(w*h, sizeof(*colors));
+        uint32_t *colors = (uint32_t*) calloc(ccl->max_labels, sizeof(*colors));
 
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
-                uint32_t v = unionfind_get_representative(uf, y*w+x);
+                uint32_t label = ccl_get_label(ccl, x, y);
+                uint32_t v = ccl_get_representative(ccl, label);
 
-                if ((int)unionfind_get_set_size(uf, v) < td->qtp.min_cluster_pixels)
+                if ((int)ccl_get_component_size(ccl, v) < td->qtp.min_cluster_pixels)
                     continue;
 
                 uint32_t color = colors[v];
@@ -1917,7 +2305,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     timeprofile_stamp(td->tp, "unionfind");
 
-    zarray_t* clusters = gradient_clusters(td, threshim, w, h, ts, uf);
+    zarray_t* clusters = gradient_clusters_ccl(td, threshim, w, h, ts, ccl);
 
     if (td->debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
@@ -1960,6 +2348,9 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     zarray_t* quads = fit_quads(td, w, h, clusters, im);
 
+    // Clean up CCL structure
+    ccl_destroy(ccl);
+
     if (td->debug) {
         FILE *f = fopen("debug_lines.ps", "w");
         fprintf(f, "%%!PS\n\n");
@@ -2001,8 +2392,6 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     }
 
     timeprofile_stamp(td->tp, "fit quads to clusters");
-
-    unionfind_destroy(uf);
 
     for (int i = 0; i < zarray_size(clusters); i++) {
         zarray_t *cluster;
