@@ -1854,10 +1854,13 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             }
             
             // Prefetch likely next pixel's label data (spatial coherence)
-            if (__builtin_expect(x + 2 < w-1, 1)) {
-                uint32_t next_label = ccl_get_label(ccl, x + 2, y);
+            // Prefetch at x+1 to align with pipeline without thrashing cache
+            if (__builtin_expect(x + 1 < w-1, 1)) {
+                // Inline lightweight check before heavier prefetch operations
+                uint32_t next_label = ccl->labels[y * ccl->width + x + 1];
                 if (next_label != 0) {
-                    simd_prefetch(&ccl->stats[ccl_get_representative(ccl, next_label)]);
+                    uint32_t next_rep = ccl->equiv[next_label];
+                    simd_prefetch(&ccl->stats[next_rep]);
                 }
             }
 

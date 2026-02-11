@@ -327,8 +327,13 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
                 ccl_component_stats_t* stats = &ccl->stats[root_label];
                 
                 // Prefetch stats for next pixel's likely label (spatial coherence)
-                if (__builtin_expect(x + 1 < width && label_row[x + 1] != 0, 1)) {
-                    simd_prefetch(&ccl->stats[equiv[label_row[x + 1]]]);
+                // Bounds check: ensure we don't read past the label array
+                if (__builtin_expect(x + 1 < width, 1)) {
+                    uint32_t next_label = label_row[x + 1];
+                    if (next_label != 0) {
+                        uint32_t next_rep = equiv[next_label];
+                        simd_prefetch(&ccl->stats[next_rep]);
+                    }
                 }
                 
                 // Update statistics (this replaces separate clustering pass)
