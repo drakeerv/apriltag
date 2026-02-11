@@ -1827,6 +1827,11 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
         bool connected_last = false;
         uint8_t* row_ptr = &threshim->buf[y*ts];  // Cache row pointer
         
+        // Prefetch next row for better cache utilization on Pi5
+        if (__builtin_expect(y + 1 < y1, 1)) {
+            simd_prefetch(&threshim->buf[(y + 1)*ts]);
+        }
+        
         for (int x = 1; x < w-1; x++) {
 
             uint8_t v0 = row_ptr[x];  // Use cached pointer
@@ -1846,6 +1851,14 @@ zarray_t* do_gradient_clusters_ccl(image_u8_t* threshim, int ts, int y0, int y1,
             if (size0 < 25) {
                 connected_last = false;
                 continue;
+            }
+            
+            // Prefetch likely next pixel's label data (spatial coherence)
+            if (__builtin_expect(x + 2 < w-1, 1)) {
+                uint32_t next_label = ccl_get_label(ccl, x + 2, y);
+                if (next_label != 0) {
+                    simd_prefetch(&ccl->stats[ccl_get_representative(ccl, next_label)]);
+                }
             }
 
             bool connected;

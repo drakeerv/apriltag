@@ -190,4 +190,64 @@ static inline uint8_t simd_reduce_max_u8(simd_u8x16_t v)
 #endif
 }
 
+// Compare equal (returns 0xFF for true, 0x00 for false)
+static inline simd_u8x16_t simd_cmpeq_u8(simd_u8x16_t a, simd_u8x16_t b)
+{
+#ifdef APRILTAG_USE_NEON
+    return vceqq_u8(a, b);
+#elif APRILTAG_USE_SSE2
+    return _mm_cmpeq_epi8(a, b);
+#else
+    simd_u8x16_t result;
+    for (int i = 0; i < 16; i++) {
+        result.data[i] = (a.data[i] == b.data[i]) ? 0xFF : 0x00;
+    }
+    return result;
+#endif
+}
+
+// Bitwise AND
+static inline simd_u8x16_t simd_and(simd_u8x16_t a, simd_u8x16_t b)
+{
+#ifdef APRILTAG_USE_NEON
+    return vandq_u8(a, b);
+#elif APRILTAG_USE_SSE2
+    return _mm_and_si128(a, b);
+#else
+    simd_u8x16_t result;
+    for (int i = 0; i < 16; i++) {
+        result.data[i] = a.data[i] & b.data[i];
+    }
+    return result;
+#endif
+}
+
+// Bitwise OR
+static inline simd_u8x16_t simd_or(simd_u8x16_t a, simd_u8x16_t b)
+{
+#ifdef APRILTAG_USE_NEON
+    return vorrq_u8(a, b);
+#elif APRILTAG_USE_SSE2
+    return _mm_or_si128(a, b);
+#else
+    simd_u8x16_t result;
+    for (int i = 0; i < 16; i++) {
+        result.data[i] = a.data[i] | b.data[i];
+    }
+    return result;
+#endif
+}
+
+// Prefetch hint for read (cache warmup)
+static inline void simd_prefetch(const void *ptr)
+{
+#ifdef APRILTAG_USE_NEON
+    __builtin_prefetch(ptr, 0, 3); // Read, high temporal locality
+#elif APRILTAG_USE_SSE2
+    _mm_prefetch((const char*)ptr, _MM_HINT_T0);
+#else
+    (void)ptr; // No-op for scalar
+#endif
+}
+
 #endif // _APRILTAG_SIMD_H_

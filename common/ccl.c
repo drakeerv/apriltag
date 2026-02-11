@@ -184,6 +184,13 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
         uint32_t* label_row = &labels[row_offset];
         uint32_t* prev_label_row = &labels[prev_row_offset];
         
+        // Prefetch next row for cache warmup (important for Pi5's cache hierarchy)
+        if (__builtin_expect(y + 1 < height, 1)) {
+            int next_buf_offset = (y + 1) * stride;
+            simd_prefetch(&buf[next_buf_offset]);
+            simd_prefetch(&labels[(y + 1) * width]);
+        }
+        
         for (int x = 1; x < width - 1; x++) {
             uint8_t val = cur_row[x];
             if (__builtin_expect(val == 127, 0)) continue; // Unlikely: skip mid-gray pixels
@@ -300,10 +307,15 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
     
     // Count component sizes and collect statistics
     // This is where we merge the clustering step into Pass 2
-    // Optimize with pointer arithmetic and fewer array lookups
+    // Heavy optimization with prefetching and pointer arithmetic
     for (int y = 0; y < height; y++) {
         int row_offset = y * width;
         uint32_t* label_row = &labels[row_offset];
+        
+        // Prefetch next row for cache warmup (Cortex-A76 has 64KB L1)
+        if (__builtin_expect(y + 1 < height, 1)) {
+            simd_prefetch(&labels[(y + 1) * width]);
+        }
         
         for (int x = 0; x < width; x++) {
             uint32_t label = label_row[x];
@@ -313,6 +325,11 @@ uint32_t ccl_process(ccl_component_t *ccl, image_u8_t *threshim) {
                 
                 // Cache pointer to stats structure to reduce array indexing
                 ccl_component_stats_t* stats = &ccl->stats[root_label];
+                
+                // Prefetch stats for next pixel's likely label (spatial coherence)
+                if (__builtin_expect(x + 1 < width && label_row[x + 1] != 0, 1)) {
+                    simd_prefetch(&ccl->stats[equiv[label_row[x + 1]]]);
+                }
                 
                 // Update statistics (this replaces separate clustering pass)
                 ccl->comp_size[root_label]++;
